@@ -12,59 +12,67 @@ if (!admin.apps.length) {
 
 export default async function handler(req, res) {
   const db = admin.firestore();
-
   try {
-    // 1. Lấy giờ Việt Nam và lùi lại 5 phút để tìm mốc giờ bắt đầu của lớp
+    // Lấy giờ Việt Nam
     const now = new Date(new Date().toLocaleString("en-US", {timeZone: "Asia/Ho_Chi_Minh"}));
-    const targetTimeObj = new Date(now.getTime() - 5 * 60000);
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const todayStr = `${yyyy}-${mm}-${dd}`;
     
-    const dayIndex = targetTimeObj.getDay();
-    const days = ["CN", "Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7"]; 
-    const currentDay = days[dayIndex];
-    
-    const targetHour = targetTimeObj.getHours().toString().padStart(2, '0');
-    const targetMin = targetTimeObj.getMinutes().toString().padStart(2, '0');
-    const targetTimeStr = `${targetHour}:${targetMin}`; // Ví dụ: "18:00"
+    const dayMap = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const currentDay = dayMap[now.getDay()];
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
 
-    // 2. Quét các lớp học đang lưu trên Firestore
     const classesSnap = await db.collection("classes").get();
-    let classesToRemind = [];
+    let pushData = null;
+    let teachersUpdate = {};
 
     classesSnap.forEach(doc => {
       const cls = doc.data();
+      // Bỏ qua nếu giáo viên đã chấm công
+      if (cls.teacherAttendance && cls.teacherAttendance[todayStr]) return;
+
       if (cls.schedule && Array.isArray(cls.schedule)) {
-        // So khớp Thứ và Giờ (VD: Lịch ghi "18:00-19:30" sẽ khớp với "18:00")
-        const match = cls.schedule.find(s => s.day === currentDay && (s.time || "").startsWith(targetTimeStr));
-        if (match) {
-          classesToRemind.push({ name: cls.name, teacher: match.teacher });
-        }
+        cls.schedule.forEach(s => {
+          if (s.day === currentDay && s.time) {
+            const startMinutes = parseInt(s.time.split(':')[0]) * 60 + parseInt(s.time.split(':')[1].split('-')[0]);
+            const elapsed = nowMinutes - startMinutes;
+
+            // Nhắc nhở mốc 5 phút
+            if (elapsed >= 5 && elapsed < 10) {
+              pushData = { title: "⏳ Đến giờ điểm danh!", body: `Lớp ${cls.name} đã bắt đầu. Vui lòng chấm công ngay!` };
+            }
+            // Cảnh báo đỏ mốc 45 phút và tự động lưu vi phạm
+            else if (elapsed >= 45 && elapsed < 50) {
+              pushData = { title: "🔴 CẢNH BÁO ĐỎ", body: `Lớp ${cls.name} đã học 45 phút chưa chấm công. Hệ thống đã ghi nhận 1 lỗi vi phạm!` };
+              if (s.teacher) {
+                const recordKey = `${doc.id}_${todayStr}`;
+                if(!teachersUpdate[s.teacher]) teachersUpdate[s.teacher] = { records: {} };
+                teachersUpdate[s.teacher].records[recordKey] = { className: cls.name, date: todayStr, time: s.time };
+              }
+            }
+          }
+        });
       }
     });
 
-    // Nếu không có lớp nào vừa bắt đầu 5 phút trước -> Bỏ qua
-    if (classesToRemind.length === 0) {
-      return res.status(200).json({ message: `Không có lớp nào bắt đầu lúc ${targetTimeStr} ${currentDay}.` });
+    if (!pushData) return res.status(200).json({ message: "Không có sự kiện" });
+
+    // Ghi đè vi phạm vào database ngầm
+    if (Object.keys(teachersUpdate).length > 0) {
+      await db.collection("meta").doc("violations").set({ teachers: teachersUpdate }, { merge: true });
     }
 
-    // 3. CÓ LỚP! Bắt đầu lấy Token và bắn thông báo
     const usersSnap = await db.collection("users").get();
     const tokens = [];
-    usersSnap.forEach(doc => { 
-      if (doc.data().fcmToken) tokens.push(doc.data().fcmToken); 
-    });
+    usersSnap.forEach(doc => { if (doc.data().fcmToken) tokens.push(doc.data().fcmToken); });
 
     if (tokens.length > 0) {
-      const classNames = classesToRemind.map(c => c.name).join(", ");
-      await admin.messaging().sendEachForMulticast({
-        tokens: tokens,
-        notification: { 
-          title: "⏳ Đến giờ điểm danh!", 
-          body: `Lớp ${classNames} đã bắt đầu được 5 phút. Thầy cô vào điểm danh nhé!` 
-        }
-      });
+      await admin.messaging().sendEachForMulticast({ tokens, notification: pushData });
     }
-    
-    res.status(200).json({ message: "Đã gửi thông báo thành công", classes: classesToRemind });
+
+    res.status(200).json({ message: "Đã xử lý thông báo và cảnh báo", data: pushData });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
