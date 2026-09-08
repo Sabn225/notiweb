@@ -10,10 +10,21 @@ if (!admin.apps.length) {
   });
 }
 
+// Bộ lọc AI mini: Chuyển tên "Cô Minh Ngọc" thành "minhngoc" để khớp với account
+function normalizeName(name) {
+  if (!name) return "";
+  return name.toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Xóa dấu tiếng Việt
+    .replace(/đ/g, "d")
+    .replace(/[^a-z0-9]/g, "") // Xóa khoảng trắng
+    .replace(/^(co|thay|gv)/, ""); // Xóa chữ cô, thầy
+}
+
 export default async function handler(req, res) {
   const db = admin.firestore();
   try {
     const now = new Date(new Date().toLocaleString("en-US", {timeZone: "Asia/Ho_Chi_Minh"}));
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
     const yyyy = now.getFullYear();
     const mm = String(now.getMonth() + 1).padStart(2, '0');
     const dd = String(now.getDate()).padStart(2, '0');
@@ -21,16 +32,42 @@ export default async function handler(req, res) {
     
     const jsDays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const currentDay = jsDays[now.getDay()];
-    const nowMinutes = now.getHours() * 60 + now.getMinutes();
 
-    const classesSnap = await db.collection("classes").get();
-    let pushData = null;
+    // 1. Tải danh sách Token phân loại theo Account
+    const usersSnap = await db.collection("users").get();
+    const userTokens = {}; 
+    usersSnap.forEach(doc => {
+      const data = doc.data();
+      if (data.fcmToken && data.email) {
+        // Cắt đuôi email để lấy username (VD: minhngoc@... -> minhngoc)
+        const username = data.email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, "");
+        if (!userTokens[username]) userTokens[username] = [];
+        userTokens[username].push(data.fcmToken);
+      }
+    });
+
+    // Hàm lấy token đích danh của 1 giáo viên
+    const getTokensForTeacher = (teacherName) => {
+      const normName = normalizeName(teacherName);
+      let tokens = [];
+      Object.keys(userTokens).forEach(uname => {
+        if (normName.includes(uname) || uname.includes(normName)) {
+          tokens.push(...userTokens[uname]);
+        }
+      });
+      return tokens;
+    };
+
+    const messagesToSend = [];
     let teachersUpdate = {};
 
-    classesSnap.forEach(doc => {
-      const cls = doc.data();
-      if (cls.teacherAttendance && cls.teacherAttendance[todayStr]) return;
+    // 2. QUÉT CHẤM CÔNG (Chỉ gửi đích danh giáo viên phụ trách)
+    const classesSnap = await db.collection("classes").get();
+    const classDocs = [];
+    classesSnap.forEach(doc => classDocs.push({ id: doc.id, ...doc.data() }));
 
+    classDocs.forEach(cls => {
+      if (cls.teacherAttendance && cls.teacherAttendance[todayStr]) return;
       if (cls.schedule && Array.isArray(cls.schedule)) {
         cls.schedule.forEach(s => {
           if (s.day === currentDay && s.time) {
@@ -38,46 +75,70 @@ export default async function handler(req, res) {
             if (!match) return;
             const startMinutes = Number(match[1]) * 60 + Number(match[2]);
             const elapsed = nowMinutes - startMinutes;
-
-            // Nhắc nhở mốc 5 phút và 40 phút (Hiện đúng 2 lần)
+            
+            let pushData = null;
             if ((elapsed >= 5 && elapsed < 10) || (elapsed >= 40 && elapsed < 45)) {
-              pushData = { 
-                title: `⏳ Lớp ${cls.name} cần điểm danh!`, 
-                body: "⚠️ Lớp học đã bắt đầu xin hãy điểm danh học sinh và chấm công (thông báo này chỉ hiện 2 lần sau 2 lần sẽ cảnh báo đỏ)" 
-              };
-            }
-            // Cảnh báo đỏ mốc 45 phút và tự động lưu vi phạm
-            else if (elapsed >= 45 && elapsed < 50) {
-              pushData = { 
-                title: "🔴 CẢNH BÁO ĐỎ", 
-                body: `Lớp ${cls.name} đã học 45 phút chưa chấm công. Hệ thống đã tự động ghi nhận 1 lỗi vi phạm!` 
-              };
+              pushData = { title: `⏳ Lớp ${cls.name} cần điểm danh!`, body: "⚠️ Lớp học đã bắt đầu xin hãy điểm danh học sinh và chấm công." };
+            } else if (elapsed >= 45 && elapsed < 50) {
+              pushData = { title: "🔴 CẢNH BÁO ĐỎ", body: `Lớp ${cls.name} đã học 45 phút chưa chấm công. Ghi nhận 1 lỗi vi phạm!` };
               if (s.teacher) {
-                const recordKey = `${doc.id}_${todayStr}`;
+                const recordKey = `${cls.id}_${todayStr}`;
                 if (!teachersUpdate[s.teacher]) teachersUpdate[s.teacher] = { records: {} };
                 teachersUpdate[s.teacher].records[recordKey] = { className: cls.name, date: todayStr, time: s.time };
               }
+            }
+
+            // Gửi báo động CHỈ cho tài khoản của giáo viên đó
+            if (pushData && s.teacher) {
+              const targets = getTokensForTeacher(s.teacher);
+              targets.forEach(token => {
+                messagesToSend.push({ token: token, notification: pushData });
+              });
             }
           }
         });
       }
     });
 
-    if (!pushData) return res.status(200).json({ message: "Không có sự kiện" });
+    // 3. QUÉT HỌC SINH MỚI (Tạo trong 5 phút qua)
+    const fiveMinsAgo = Date.now() - 5 * 60 * 1000;
+    const studentsSnap = await db.collection("students").where("createdAt", ">=", fiveMinsAgo).get();
+    
+    studentsSnap.forEach(doc => {
+      const student = doc.data();
+      if (student.className) {
+        const targetClass = classDocs.find(c => c.name.toLowerCase() === student.className.trim().toLowerCase());
+        if (targetClass && targetClass.schedule) {
+          const teachers = new Set();
+          targetClass.schedule.forEach(s => { if (s.teacher) teachers.add(s.teacher); });
+          
+          teachers.forEach(tName => {
+            const targets = getTokensForTeacher(tName);
+            targets.forEach(token => {
+              messagesToSend.push({
+                token: token,
+                notification: {
+                  title: "🎉 Học sinh mới!",
+                  body: `Bạn có học sinh mới: ${student.name} vừa được xếp vào lớp ${targetClass.name}.`
+                }
+              });
+            });
+          });
+        }
+      }
+    });
 
+    // 4. LƯU VI PHẠM & GỬI THÔNG BÁO TỔNG
     if (Object.keys(teachersUpdate).length > 0) {
       await db.collection("meta").doc("violations").set({ teachers: teachersUpdate }, { merge: true });
     }
 
-    const usersSnap = await db.collection("users").get();
-    const tokens = [];
-    usersSnap.forEach(doc => { if (doc.data().fcmToken) tokens.push(doc.data().fcmToken); });
-
-    if (tokens.length > 0) {
-      await admin.messaging().sendEachForMulticast({ tokens, notification: pushData });
+    if (messagesToSend.length > 0) {
+      // Bắn toàn bộ tin nhắn đã được chia luồng cho từng người
+      await admin.messaging().sendEach(messagesToSend);
     }
 
-    res.status(200).json({ message: "Đã xử lý thông báo và cảnh báo", data: pushData });
+    res.status(200).json({ message: "Đã phân luồng gửi thành công", msgs: messagesToSend.length });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
