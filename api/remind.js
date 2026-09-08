@@ -39,19 +39,19 @@ export default async function handler(req, res) {
     usersSnap.forEach(doc => {
       const data = doc.data();
       if (data.fcmToken && data.email) {
-        // Cắt đuôi email để lấy username (VD: minhngoc@... -> minhngoc)
+        // Cắt đuôi email để lấy username (VD: baoloc@... -> baoloc)
         const username = data.email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, "");
         if (!userTokens[username]) userTokens[username] = [];
         userTokens[username].push(data.fcmToken);
       }
     });
 
-    // Hàm lấy token đích danh của 1 giáo viên
+    // Hàm lấy token đích danh của 1 giáo viên (Sử dụng so sánh chính xác 100%)
     const getTokensForTeacher = (teacherName) => {
       const normName = normalizeName(teacherName);
       let tokens = [];
       Object.keys(userTokens).forEach(uname => {
-        if (normName.includes(uname) || uname.includes(normName)) {
+        if (normName === uname) {
           tokens.push(...userTokens[uname]);
         }
       });
@@ -134,7 +134,6 @@ export default async function handler(req, res) {
     }
 
     if (messagesToSend.length > 0) {
-      // Bắn toàn bộ tin nhắn đã được chia luồng cho từng người
       await admin.messaging().sendEach(messagesToSend);
     }
 
