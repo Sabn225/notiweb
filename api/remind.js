@@ -13,15 +13,14 @@ if (!admin.apps.length) {
 export default async function handler(req, res) {
   const db = admin.firestore();
   try {
-    // Lấy giờ Việt Nam
     const now = new Date(new Date().toLocaleString("en-US", {timeZone: "Asia/Ho_Chi_Minh"}));
     const yyyy = now.getFullYear();
     const mm = String(now.getMonth() + 1).padStart(2, '0');
     const dd = String(now.getDate()).padStart(2, '0');
     const todayStr = `${yyyy}-${mm}-${dd}`;
     
-    const dayMap = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const currentDay = dayMap[now.getDay()];
+    const jsDays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const currentDay = jsDays[now.getDay()];
     const nowMinutes = now.getHours() * 60 + now.getMinutes();
 
     const classesSnap = await db.collection("classes").get();
@@ -30,25 +29,32 @@ export default async function handler(req, res) {
 
     classesSnap.forEach(doc => {
       const cls = doc.data();
-      // Bỏ qua nếu giáo viên đã chấm công
       if (cls.teacherAttendance && cls.teacherAttendance[todayStr]) return;
 
       if (cls.schedule && Array.isArray(cls.schedule)) {
         cls.schedule.forEach(s => {
           if (s.day === currentDay && s.time) {
-            const startMinutes = parseInt(s.time.split(':')[0]) * 60 + parseInt(s.time.split(':')[1].split('-')[0]);
+            const match = /^(\d{1,2}):(\d{2})/.exec(s.time.trim());
+            if (!match) return;
+            const startMinutes = Number(match[1]) * 60 + Number(match[2]);
             const elapsed = nowMinutes - startMinutes;
 
-            // Nhắc nhở mốc 5 phút
-            if (elapsed >= 5 && elapsed < 10) {
-              pushData = { title: "⏳ Đến giờ điểm danh!", body: `Lớp ${cls.name} đã bắt đầu. Vui lòng chấm công ngay!` };
+            // Nhắc nhở mốc 5 phút và 40 phút (Hiện đúng 2 lần)
+            if ((elapsed >= 5 && elapsed < 10) || (elapsed >= 40 && elapsed < 45)) {
+              pushData = { 
+                title: `⏳ Lớp ${cls.name} cần điểm danh!`, 
+                body: "⚠️ Lớp học đã bắt đầu xin hãy điểm danh học sinh và chấm công (thông báo này chỉ hiện 2 lần sau 2 lần sẽ cảnh báo đỏ)" 
+              };
             }
             // Cảnh báo đỏ mốc 45 phút và tự động lưu vi phạm
             else if (elapsed >= 45 && elapsed < 50) {
-              pushData = { title: "🔴 CẢNH BÁO ĐỎ", body: `Lớp ${cls.name} đã học 45 phút chưa chấm công. Hệ thống đã ghi nhận 1 lỗi vi phạm!` };
+              pushData = { 
+                title: "🔴 CẢNH BÁO ĐỎ", 
+                body: `Lớp ${cls.name} đã học 45 phút chưa chấm công. Hệ thống đã tự động ghi nhận 1 lỗi vi phạm!` 
+              };
               if (s.teacher) {
                 const recordKey = `${doc.id}_${todayStr}`;
-                if(!teachersUpdate[s.teacher]) teachersUpdate[s.teacher] = { records: {} };
+                if (!teachersUpdate[s.teacher]) teachersUpdate[s.teacher] = { records: {} };
                 teachersUpdate[s.teacher].records[recordKey] = { className: cls.name, date: todayStr, time: s.time };
               }
             }
@@ -59,7 +65,6 @@ export default async function handler(req, res) {
 
     if (!pushData) return res.status(200).json({ message: "Không có sự kiện" });
 
-    // Ghi đè vi phạm vào database ngầm
     if (Object.keys(teachersUpdate).length > 0) {
       await db.collection("meta").doc("violations").set({ teachers: teachersUpdate }, { merge: true });
     }
