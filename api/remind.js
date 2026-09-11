@@ -118,35 +118,15 @@ export default async function handler(req, res) {
         const actionText = notif.type === "removed" ? "➖ Học sinh nghỉ" : "➕ Học sinh mới";
         const bodyText = `${notif.className ? "Lớp " + notif.className + " · " : ""}Thực hiện bởi ${(notif.byUser || "?").split("@")[0]}`;
 
-        // 3.1 Bắn thông báo cho quản lý (ngocanh) về TẤT CẢ biến động
+        // CHỈ bắn thông báo cho quản lý (ngocanh) về TẤT CẢ biến động
         adminTokens.forEach(token => {
           messagesToSend.push({
             token: token,
             notification: { title: `${actionText}: ${notif.studentName}`, body: bodyText }
           });
         });
-
-        // 3.2 Bắn thông báo ĐÍCH DANH cho Giáo viên chủ nhiệm của lớp đó
-        if (notif.className) {
-          const targetClass = classDocs.find(c => c.name.toLowerCase() === notif.className.trim().toLowerCase());
-          if (targetClass && targetClass.schedule) {
-            const teachers = new Set();
-            targetClass.schedule.forEach(s => { if (s.teacher) teachers.add(s.teacher); });
-            
-            teachers.forEach(tName => {
-              const targets = getTokensForTeacher(tName);
-              targets.forEach(token => {
-                messagesToSend.push({
-                  token: token,
-                  notification: { title: `${actionText}: ${notif.studentName}`, body: bodyText }
-                });
-              });
-            });
-          }
-        }
       });
     }
-
     // 4. LƯU VI PHẠM & GỬI THÔNG BÁO TỔNG
     if (Object.keys(teachersUpdate).length > 0) {
       await db.collection("meta").doc("violations").set({ teachers: teachersUpdate }, { merge: true });
