@@ -100,33 +100,52 @@ export default async function handler(req, res) {
       }
     });
 
-    // 3. QUÉT HỌC SINH MỚI (Tạo trong 5 phút qua)
+    // 3. QUÉT THÔNG BÁO THÊM/XÓA HỌC SINH (Trong 5 phút qua)
     const fiveMinsAgo = Date.now() - 5 * 60 * 1000;
-    const studentsSnap = await db.collection("students").where("createdAt", ">=", fiveMinsAgo).get();
-    
-    studentsSnap.forEach(doc => {
-      const student = doc.data();
-      if (student.className) {
-        const targetClass = classDocs.find(c => c.name.toLowerCase() === student.className.trim().toLowerCase());
-        if (targetClass && targetClass.schedule) {
-          const teachers = new Set();
-          targetClass.schedule.forEach(s => { if (s.teacher) teachers.add(s.teacher); });
-          
-          teachers.forEach(tName => {
-            const targets = getTokensForTeacher(tName);
-            targets.forEach(token => {
-              messagesToSend.push({
-                token: token,
-                notification: {
-                  title: "🎉 Học sinh mới!",
-                  body: `Bạn có học sinh mới: ${student.name} vừa được xếp vào lớp ${targetClass.name}.`
-                }
+    const notifSnap = await db.collection("studentNotifications").where("createdAt", ">=", fiveMinsAgo).get();
+
+    if (!notifSnap.empty) {
+      // Tìm Token của tài khoản ngocanh
+      const adminTokens = [];
+      Object.keys(userTokens).forEach(uname => {
+        if (uname === "ngocanh" || uname === "ngocanh@ducstar.edu") {
+          adminTokens.push(...userTokens[uname]);
+        }
+      });
+
+      notifSnap.forEach(doc => {
+        const notif = doc.data();
+        const actionText = notif.type === "removed" ? "➖ Học sinh nghỉ" : "➕ Học sinh mới";
+        const bodyText = `${notif.className ? "Lớp " + notif.className + " · " : ""}Thực hiện bởi ${(notif.byUser || "?").split("@")[0]}`;
+
+        // 3.1 Bắn thông báo cho quản lý (ngocanh) về TẤT CẢ biến động
+        adminTokens.forEach(token => {
+          messagesToSend.push({
+            token: token,
+            notification: { title: `${actionText}: ${notif.studentName}`, body: bodyText }
+          });
+        });
+
+        // 3.2 Bắn thông báo ĐÍCH DANH cho Giáo viên chủ nhiệm của lớp đó
+        if (notif.className) {
+          const targetClass = classDocs.find(c => c.name.toLowerCase() === notif.className.trim().toLowerCase());
+          if (targetClass && targetClass.schedule) {
+            const teachers = new Set();
+            targetClass.schedule.forEach(s => { if (s.teacher) teachers.add(s.teacher); });
+            
+            teachers.forEach(tName => {
+              const targets = getTokensForTeacher(tName);
+              targets.forEach(token => {
+                messagesToSend.push({
+                  token: token,
+                  notification: { title: `${actionText}: ${notif.studentName}`, body: bodyText }
+                });
               });
             });
-          });
+          }
         }
-      }
-    });
+      });
+    }
 
     // 4. LƯU VI PHẠM & GỬI THÔNG BÁO TỔNG
     if (Object.keys(teachersUpdate).length > 0) {
